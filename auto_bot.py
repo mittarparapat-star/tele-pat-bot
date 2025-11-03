@@ -8,7 +8,7 @@ import pytz
 import json
 import os
 
-TOKEN = "8522596844:AAFPK0u26BiqRu3mA9sYUJmNTFnzbcjqAcQ"  # Replace with your bot token
+TOKEN = os.getenv("BOT_TOKEN")  # Replace with your bot token
 IST = pytz.timezone("Asia/Kolkata")
 
 CHANNEL_NAME, MESSAGE, TIME, DAILY = range(4)
@@ -184,3 +184,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
