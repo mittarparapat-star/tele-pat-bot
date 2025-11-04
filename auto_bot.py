@@ -4,7 +4,18 @@ from telegram.ext import (
     ConversationHandler, filters, ContextTypes
 )
 import datetime, pytz, json, os, asyncio
+###temp solution###
+import threading, http.server, socketserver, os
 
+def fake_server():
+    PORT = int(os.environ.get("PORT", 10000))
+    Handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        httpd.serve_forever()
+
+threading.Thread(target=fake_server, daemon=True).start()
+
+##end tem sol##
 # --- Secure Bot Token ---
 TOKEN = os.getenv("BOT_TOKEN")  # Set in Render Environment Variables
 IST = pytz.timezone("Asia/Kolkata")
@@ -228,3 +239,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
