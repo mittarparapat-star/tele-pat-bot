@@ -159,7 +159,7 @@ async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- Main ----------------
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).concurrent_updates(True).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -184,4 +184,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
