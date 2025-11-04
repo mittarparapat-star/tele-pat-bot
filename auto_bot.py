@@ -1,200 +1,104 @@
+import asyncio
+from datetime import datetime, timedelta
+import pytz
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ConversationHandler, filters, ContextTypes
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    ConversationHandler,
 )
-import datetime
-import pytz
-import json
-import os
-import asyncio
+import nest_asyncio
 
-TOKEN = os.getenv("BOT_TOKEN")  # set in Render Environment
+# Apply nest_asyncio for Render compatibility
+nest_asyncio.apply()
+
+# --- SETTINGS ---
+BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+CHANNEL_ID = "@your_channel_id"  # e.g. @myupdateschannel
 IST = pytz.timezone("Asia/Kolkata")
 
-CHANNEL_NAME, MESSAGE, TIME, DAILY = range(4)
-SCHEDULE_FILE = "scheduled.json"
-CONFIG_FILE = "config.json"
+# Conversation states
+WAITING_FOR_MESSAGE, WAITING_FOR_TIME = range(2)
 
-# ---------------- Load / Save Data ----------------
-if os.path.exists(SCHEDULE_FILE):
-    with open(SCHEDULE_FILE, "r") as f:
-        scheduled_messages = json.load(f)
-else:
-    scheduled_messages = []
 
-if os.path.exists(CONFIG_FILE):
-    with open(CONFIG_FILE, "r") as f:
-        config = json.load(f)
-else:
-    config = {}
-
-def save_schedules():
-    with open(SCHEDULE_FILE, "w") as f:
-        json.dump(scheduled_messages, f, indent=4, default=str)
-
-def save_config():
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4)
-
-# ---------------- Conversation ----------------
+# Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "channel" in config:
-        await update.message.reply_text(
-            f"✅ Using saved channel: {config['channel']}\nNow send me the message to post (text/photo):"
-        )
-        context.user_data["channel"] = config["channel"]
-        return MESSAGE
-    else:
-        await update.message.reply_text("Hi! 👋 Please enter your channel username or ID (e.g. @mychannel or -100xxxx):")
-        return CHANNEL_NAME
+    await update.message.reply_text("Send me the message you want to schedule:")
+    return WAITING_FOR_MESSAGE
 
-async def get_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    channel = update.message.text.strip()
-    config["channel"] = channel
-    save_config()
-    context.user_data["channel"] = channel
-    await update.message.reply_text(f"✅ Channel saved as {channel}\nNow send me the message to post:")
-    return MESSAGE
 
-async def get_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if msg.text:
-        context.user_data["msg_type"] = "text"
-        context.user_data["content"] = msg.text
-    elif msg.photo:
-        context.user_data["msg_type"] = "photo"
-        context.user_data["content"] = msg.photo[-1].file_id
-        context.user_data["caption"] = msg.caption or ""
-    else:
-        await msg.reply_text("⚠️ Unsupported message type. Send text or photo.")
-        return MESSAGE
+# Receive message to send later
+async def receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["message_to_send"] = update.message.text
+    await update.message.reply_text("Now send the time(s) (e.g., 08:00, 09:00, 14:30):")
+    return WAITING_FOR_TIME
 
-    await msg.reply_text("⏰ Great! Now send the time(s) (HH:MM, 24hr IST). You can give multiple like 08:00,09:30,15:45:")
-    return TIME
 
-async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    times_text = update.message.text
-    try:
-        times = [datetime.datetime.strptime(t.strip(), "%H:%M").time() for t in times_text.split(",")]
-        context.user_data["times"] = times
-        await update.message.reply_text("📅 Do you want this to repeat daily? (yes/no)")
-        return DAILY
-    except ValueError:
-        await update.message.reply_text("⚠️ Invalid format! Use HH:MM or multiple like 09:00,13:30,20:00")
-        return TIME
+# Receive time(s) and schedule jobs
+async def receive_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    times_input = update.message.text
+    msg = context.user_data.get("message_to_send")
 
-async def get_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    daily = update.message.text.lower() in ["yes", "y"]
-    data = context.user_data
+    if not msg:
+        await update.message.reply_text("Error: No message found. Please start again with /start.")
+        return ConversationHandler.END
 
-    for t in data["times"]:
-        job_data = {
-            "channel": data["channel"],
-            "msg_type": data["msg_type"],
-            "content": data["content"],
-            "caption": data.get("caption", ""),
-            "time": t.strftime("%H:%M"),
-            "daily": daily,
-        }
-        scheduled_messages.append(job_data)
-        schedule_job(context.application, job_data)
+    times = [t.strip() for t in times_input.split(",")]
 
-    save_schedules()
-    await update.message.reply_text(
-        f"✅ Message scheduled for {', '.join([t.strftime('%H:%M') for t in data['times']])} IST {'(daily)' if daily else ''}!"
-    )
+    for t in times:
+        try:
+            hour, minute = map(int, t.split(":"))
+            now = datetime.now(IST)
+            scheduled_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if scheduled_time < now:
+                scheduled_time += timedelta(days=1)
+
+            delay = (scheduled_time - now).total_seconds()
+            context.job_queue.run_once(send_scheduled_message, when=delay, data=msg)
+
+            await update.message.reply_text(f"✅ Message scheduled for {t} IST")
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Invalid time format: {t}. Use HH:MM (e.g., 09:00)")
+
     return ConversationHandler.END
 
-# ---------------- Scheduler ----------------
-def schedule_job(app, msg):
-    if not app.job_queue:
-        app.job_queue = app.job_queue or app.create_task_queue()
 
-    now = datetime.datetime.now(IST)
-    msg_time = datetime.datetime.strptime(msg["time"], "%H:%M").time()
-    send_time = now.replace(hour=msg_time.hour, minute=msg_time.minute, second=0, microsecond=0)
-    if send_time < now:
-        send_time += datetime.timedelta(days=1)
-    delay = (send_time - now).total_seconds()
-    app.job_queue.run_once(send_scheduled_message, when=delay, data=msg)
-
+# Send message to channel
 async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE):
     msg = context.job.data
-    try:
-        if msg["msg_type"] == "text":
-            await context.bot.send_message(msg["channel"], msg["content"])
-        elif msg["msg_type"] == "photo":
-            await context.bot.send_photo(msg["channel"], msg["content"], caption=msg["caption"])
-        print(f"✅ Sent message to {msg['channel']} at {msg['time']}")
-    except Exception as e:
-        print(f"❌ Error sending message: {e}")
+    await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
 
-    if msg["daily"]:
-        context.job_queue.run_once(send_scheduled_message, when=24*3600, data=msg)
 
-# ---------------- Commands ----------------
-async def list_schedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not scheduled_messages:
-        await update.message.reply_text("📭 No scheduled messages.")
-        return
-    msg = "🗓️ *Scheduled Messages:*\n\n"
-    for i, s in enumerate(scheduled_messages, start=1):
-        msg += f"{i}. 🕒 {s['time']} | {'Daily' if s['daily'] else 'One-time'} | {s['channel']}\n"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+# Cancel command
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Scheduling cancelled.")
+    return ConversationHandler.END
 
-async def cancel_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        index = int(context.args[0]) - 1
-        if 0 <= index < len(scheduled_messages):
-            removed = scheduled_messages.pop(index)
-            save_schedules()
-            await update.message.reply_text(f"🗑️ Canceled schedule for {removed['time']} on {removed['channel']}")
-        else:
-            await update.message.reply_text("⚠️ Invalid schedule number.")
-    except (IndexError, ValueError):
-        await update.message.reply_text("Usage: /cancel <schedule_number>")
 
-async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        channel = context.args[0]
-        config["channel"] = channel
-        save_config()
-        await update.message.reply_text(f"✅ Default channel updated to: {channel}")
-    else:
-        await update.message.reply_text("Usage: /setchannel <@channelusername> or <-100id>")
-
-# ---------------- Error Handler ----------------
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print(f"⚠️ Exception while handling update: {context.error}")
-
-# ---------------- Main ----------------
+# Main function
 async def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_error_handler(error_handler)
+    application = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            CHANNEL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel)],
-            MESSAGE: [MessageHandler(filters.ALL & ~filters.COMMAND, get_message)],
-            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
-            DAILY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_daily)],
+            WAITING_FOR_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message)],
+            WAITING_FOR_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_time)],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("list", list_schedules))
-    app.add_handler(CommandHandler("cancel", cancel_schedule))
-    app.add_handler(CommandHandler("setchannel", set_channel))
+    application.add_handler(conv_handler)
+    await application.initialize()
+    await application.start()
+    print("🚀 Bot running on Render...")
+    await application.updater.start_polling()
+    await asyncio.Event().wait()  # keep alive
 
-    # Reload all jobs on restart
-    for s in scheduled_messages:
-        schedule_job(app, s)
 
-    print("🤖 Bot started successfully and running 24x7...")
-    await app.run_polling()
-
+# Safe startup for Render
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.get_event_loop().run_until_complete(main())
