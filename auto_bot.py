@@ -5,15 +5,17 @@ from telegram.ext import (
 )
 import datetime, pytz, json, os, asyncio
 ###temp solution###
-import threading, http.server, socketserver, os
+import threading, http.server, socketserver
 
-def fake_server():
-    PORT = int(os.environ.get("PORT", 10000))
-    Handler = http.server.SimpleHTTPRequestHandler
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+def keep_alive_server():
+    port = int(os.environ.get("PORT", 8080))
+    handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", port), handler) as httpd:
+        print(f"⚡ Keep-alive server running on port {port}")
         httpd.serve_forever()
 
-threading.Thread(target=fake_server, daemon=True).start()
+threading.Thread(target=keep_alive_server, daemon=True).start()
+
 
 ##end tem sol##
 # --- Secure Bot Token ---
@@ -239,4 +241,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
